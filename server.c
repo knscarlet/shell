@@ -291,7 +291,7 @@ bool cmd_sh(struct cmd_struct *cmds) {
         perror("send");
         return false;
     }
-    x = send(cmds->client_fd, buffer, buffer_len, MSG_WAITALL);
+    x = send(cmds->client_fd, buffer, size, MSG_WAITALL);
     if (x < 0) {
         perror("send");
         return false;
