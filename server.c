@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -9,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
+#include <sys/wait.h>
 struct cmd_struct {
     int client_fd;
     _Atomic(bool) *used;
@@ -20,7 +22,10 @@ pthread_mutex_t cmd_stop_mutex = PTHREAD_MUTEX_INITIALIZER;
 bool cmd_stop;
 void *cmd_thread_function(void *cmd_struct_pointer);
 bool cmd_help(struct cmd_struct *cmd);
+bool cmd_ls(struct cmd_struct *cmd);
+bool cmd_sh(struct cmd_struct *cmd);
 void *cmd_accept_function(void *socket_fd_pointer);
+static int system_fd(const char *cmd);
 int main() {
     int reuse = 1;
     pthread_t accept_thread;    
@@ -84,9 +89,10 @@ void *cmd_thread_function(void *cmd_struct_pointer) {
         uint16_t cmd_str_len;
         char *ptr_buffer = cmd_buffer;
         int size;
-        size_t recv_length = sizeof(cmd_buffer);
+        size_t recv_length = sizeof(cmd_buffer) - 1;
         size_t total_size = 0;
 
+        memset(cmd_buffer, 0, sizeof(cmd_buffer));
         while (true) {
             if (recv_length == 0) {
                 break;
@@ -144,8 +150,20 @@ void *cmd_thread_function(void *cmd_struct_pointer) {
             cmd_stop = cmd_help(cmd);
             continue;
         }else if (!strncmp(ptr_buffer, "ls", 2)) {
-            // cmd_stop = cmd_ls(cmd);
-            // continue;
+            size_t str_len = strlen(ptr_buffer) + 3;
+            char *c = malloc(str_len);
+            if (!c) {
+                cmd_stop = true;
+                continue;
+            }
+            snprintf(c, str_len + 3, "sh %s", ptr_buffer);
+            cmd->cmd_str = c;
+            cmd_stop = cmd_sh(cmd);
+            free(c);
+            continue;
+        }else if (!strncmp(ptr_buffer, "sh" ,2)) {
+            cmd_stop = cmd_sh(cmd);
+            continue;
         } else {
             static const char str[] = "command not found";
             uint16_t str_len = htons(sizeof(str));
@@ -238,5 +256,82 @@ void *cmd_accept_function(void *socket_fd_pointer) {
     }
     return NULL;
 }
+const char *get_dir_name(const char *cmd) {
+    cmd += 2;
+    if (*cmd == '\0') {
+        return ".";
+    }
+    return cmd + 1;
+}
+bool cmd_ls(struct cmd_struct *cmd) {
+    // const char *dir = get_dir_name(cmd->cmd_str);
+    // DIR *fd_dir = opendir(dir);
+    return true;
+}
+bool cmd_sh(struct cmd_struct *cmds) {
+    const char *cmd = cmds->cmd_str + 2;
+    int fd;
+    char buffer[8000];
+    int size;
+    fd = system_fd(cmd);
+    if (fd < 0) {
+        return false;
+    }
+    size = read(fd, buffer, sizeof(buffer) - 1);
+    printf("size = %d\n", size);
+    close(fd);
+    if (size < 0) {
+        perror("read");
+        return false;
+    }
+    buffer[size] = '\0';
+    uint16_t buffer_len = htons((uint16_t)size);
+    int x = send(cmds->client_fd, &buffer_len, sizeof(buffer_len), MSG_WAITALL);
+    if (x < 0) {
+        perror("send");
+        return false;
+    }
+    x = send(cmds->client_fd, buffer, buffer_len, MSG_WAITALL);
+    if (x < 0) {
+        perror("send");
+        return false;
+    }
+    return true;
+}
 
+static int system_fd(const char *cmd)
+{
+    int pipe_fd[2];
+    pid_t child;
+
+    if (pipe(pipe_fd)) {
+        perror("pipe");
+        return -1;
+    }
+
+    child = fork();
+    if (child < 0) {
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        perror("fork");
+        return -1;
+    }
+
+    if (!child) {
+        int exit_code;
+
+        dup2(pipe_fd[1], 1);
+        dup2(pipe_fd[1], 2);
+        exit_code = system(cmd);
+        close(0);
+        close(1);
+        close(2);
+        close(pipe_fd[0]);
+        exit(exit_code);
+    }
+
+    close(pipe_fd[1]);
+    wait(NULL);
+    return pipe_fd[0];
+}
 
